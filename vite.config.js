@@ -1,7 +1,6 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
-// https://vite.dev/config/
 export default defineConfig({
   plugins: [react()],
   define: {
@@ -9,5 +8,11 @@ export default defineConfig({
   },
   optimizeDeps: {
     exclude: ['@imgly/background-removal']
+  },
+  build: {
+    chunkSizeWarningLimit: 30000,
+    rollupOptions: {
+      external: [],
+    }
   }
 })
