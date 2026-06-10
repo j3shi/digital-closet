@@ -1,13 +1,17 @@
 import { useState, useRef, useCallback, useEffect } from "react";
-import { addOutfitImage } from "./db";
+import { saveOutfit, updateOutfit } from "./db";
+
+const CANVAS_W = 360;
+const CANVAS_H = 480;
 
 const S = {
-  root: { display: "flex", flexDirection: "column", height: "calc(100vh - 100px)" },
-  canvas: {
-    position: "relative", flex: "0 0 340px",
+  root: { display: "flex", flexDirection: "column" },
+  canvasWrap: {
+    position: "relative", width: "100%", paddingBottom: `${(CANVAS_H / CANVAS_W) * 100}%`,
     background: "#f5f5f0", borderRadius: 16, overflow: "hidden",
     touchAction: "none", userSelect: "none",
   },
+  canvasInner: { position: "absolute", inset: 0 },
   canvasEmpty: {
     position: "absolute", inset: 0, display: "flex",
     alignItems: "center", justifyContent: "center",
@@ -16,8 +20,11 @@ const S = {
   canvasEmptyIcon: { fontSize: 40, opacity: 0.2 },
   canvasEmptyText: { color: "#aaa", fontSize: 13 },
   item: (x, y, w, h, zIndex, selected) => ({
-    position: "absolute", left: x, top: y, width: w, height: h, zIndex,
-    cursor: "grab", outline: selected ? "2px solid #d4a0a0" : "none",
+    position: "absolute",
+    left: `${x}%`, top: `${y}%`,
+    width: `${w}%`, height: `${h}%`,
+    zIndex, cursor: "grab",
+    outline: selected ? "2px solid #d4a0a0" : "none",
     outlineOffset: 2, borderRadius: 4, boxSizing: "border-box",
   }),
   itemImg: { width: "100%", height: "100%", objectFit: "contain", display: "block", pointerEvents: "none" },
@@ -34,10 +41,9 @@ const S = {
   },
   toolbar: { display: "flex", gap: 8, padding: "10px 0", alignItems: "center", flexWrap: "wrap" },
   btnIcon: (disabled) => ({
-    padding: "7px 12px", borderRadius: 8,
-    background: "#2e2e36", color: disabled ? "#555" : "#f0ece4",
-    border: "1px solid #3a3a44", fontSize: 12,
-    cursor: disabled ? "default" : "pointer", opacity: disabled ? 0.5 : 1,
+    padding: "7px 12px", borderRadius: 8, background: "#2e2e36",
+    color: disabled ? "#555" : "#f0ece4", border: "1px solid #3a3a44",
+    fontSize: 12, cursor: disabled ? "default" : "pointer", opacity: disabled ? 0.5 : 1,
   }),
   btnSave: (disabled) => ({
     marginLeft: "auto", padding: "8px 18px", borderRadius: 8,
@@ -62,25 +68,52 @@ const S = {
   spinner: { width: 28, height: 28, border: "3px solid #3a3a44", borderTop: "3px solid #d4a0a0", borderRadius: "50%", animation: "spin 0.8s linear infinite" },
   toast: { position: "fixed", bottom: 24, left: "50%", transform: "translateX(-50%)", background: "#2e2e36", color: "#f0ece4", padding: "10px 20px", borderRadius: 20, fontSize: 13, zIndex: 300, whiteSpace: "nowrap", boxShadow: "0 4px 20px rgba(0,0,0,0.4)" },
   sectionLabel: { fontSize: 12, color: "#555", textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 8, marginTop: 12 },
+  nameInput: { background: "none", border: "none", borderBottom: "1px solid #3a3a44", color: "#f0ece4", fontSize: 15, fontWeight: 600, outline: "none", padding: "2px 0", width: 180 },
 };
 
-export default function BuildTab({ uid, clothes, onOutfitSaved }) {
-  const [items, setItems] = useState([]);
+// Generate a small thumbnail from canvas items
+async function generateThumbnail(items, clothes) {
+  const W = 200, H = Math.round(200 * CANVAS_H / CANVAS_W);
+  const off = document.createElement("canvas");
+  off.width = W; off.height = H;
+  const ctx = off.getContext("2d");
+  ctx.fillStyle = "#f5f5f0";
+  ctx.fillRect(0, 0, W, H);
+  const sorted = [...items].sort((a, b) => a.zIndex - b.zIndex);
+  await Promise.all(sorted.map(item => new Promise(resolve => {
+    const cloth = clothes.find(c => c.id === item.clothId);
+    if (!cloth) return resolve();
+    const img = new Image();
+    img.onload = () => {
+      ctx.drawImage(img,
+        (item.x / 100) * W, (item.y / 100) * H,
+        (item.w / 100) * W, (item.h / 100) * H
+      );
+      resolve();
+    };
+    img.onerror = resolve;
+    img.src = cloth.imageBase64;
+  })));
+  return off.toDataURL("image/jpeg", 0.6);
+}
+
+export default function BuildTab({ uid, clothes, initialOutfit, onOutfitSaved, onClose }) {
+  const isEditing = !!initialOutfit;
+
+  const [items, setItems] = useState(() => {
+    if (!initialOutfit) return [];
+    return initialOutfit.items.map(item => {
+      const cloth = clothes.find(c => c.id === item.clothId);
+      return cloth ? { ...item, imageBase64: cloth.imageBase64, name: cloth.name } : null;
+    }).filter(Boolean);
+  });
+  const [outfitName, setOutfitName] = useState(initialOutfit?.name || `Outfit ${new Date().toLocaleDateString("fi-FI")}`);
   const [selected, setSelected] = useState(null);
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState(null);
   const canvasRef = useRef();
-  const nextZ = useRef(1);
-
-  // dragRef holds all mutable drag state — no re-renders during drag
-  const dragRef = useRef({
-    active: false,
-    didMove: false,
-    type: null,       // 'move' | 'resize'
-    itemId: null,
-    startX: 0, startY: 0,
-    origX: 0, origY: 0, origW: 0, origH: 0,
-  });
+  const nextZ = useRef(items.length ? Math.max(...items.map(i => i.zIndex)) + 1 : 1);
+  const dragRef = useRef({ active: false, didMove: false, type: null, itemId: null, startX: 0, startY: 0, origX: 0, origY: 0, origW: 0, origH: 0 });
 
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(null), 2500); };
 
@@ -90,25 +123,16 @@ export default function BuildTab({ uid, clothes, onOutfitSaved }) {
       id, clothId: cloth.id,
       imageBase64: cloth.imageBase64,
       name: cloth.name,
-      x: 20 + (prev.length % 6) * 16,
-      y: 20 + (prev.length % 6) * 16,
-      w: 110, h: 140,
+      x: 5 + (prev.length % 5) * 4,
+      y: 5 + (prev.length % 5) * 4,
+      w: 30, h: 30,
       zIndex: ++nextZ.current,
     }]);
     setSelected(id);
   };
 
-  const removeItem = (e, id) => {
-    e.stopPropagation();
-    setItems(prev => prev.filter(i => i.id !== id));
-    setSelected(null);
-  };
-
-  const bringForward = () => {
-    if (!selected) return;
-    setItems(prev => prev.map(i => i.id === selected ? { ...i, zIndex: ++nextZ.current } : i));
-  };
-
+  const removeItem = (e, id) => { e.stopPropagation(); setItems(prev => prev.filter(i => i.id !== id)); setSelected(null); };
+  const bringForward = () => { if (!selected) return; setItems(prev => prev.map(i => i.id === selected ? { ...i, zIndex: ++nextZ.current } : i)); };
   const sendBack = () => {
     if (!selected) return;
     const minZ = Math.min(...items.map(i => i.zIndex));
@@ -118,67 +142,39 @@ export default function BuildTab({ uid, clothes, onOutfitSaved }) {
   const getPos = (e) => {
     const rect = canvasRef.current.getBoundingClientRect();
     const src = e.touches ? e.touches[0] : e;
-    return { x: src.clientX - rect.left, y: src.clientY - rect.top };
+    return { x: ((src.clientX - rect.left) / rect.width) * 100, y: ((src.clientY - rect.top) / rect.height) * 100 };
   };
 
-  // ── Pointer down on an item ───────────────────────────────────────────────
   const onItemDown = (e, id, type) => {
-    e.stopPropagation();
-    e.preventDefault();
-
-    // Find current item state
+    e.stopPropagation(); e.preventDefault();
     setItems(prev => {
       const item = prev.find(i => i.id === id);
       if (!item) return prev;
       const pos = getPos(e);
-      dragRef.current = {
-        active: true, didMove: false, type, itemId: id,
-        startX: pos.x, startY: pos.y,
-        origX: item.x, origY: item.y, origW: item.w, origH: item.h,
-      };
-      // Bring to top
+      dragRef.current = { active: true, didMove: false, type, itemId: id, startX: pos.x, startY: pos.y, origX: item.x, origY: item.y, origW: item.w, origH: item.h };
       return prev.map(i => i.id === id ? { ...i, zIndex: ++nextZ.current } : i);
     });
-
     setSelected(id);
   };
 
-  // ── Canvas background click — only deselect if no drag happened ──────────
-  const onCanvasClick = () => {
-    if (dragRef.current.didMove) return;
-    setSelected(null);
-  };
+  const onCanvasClick = () => { if (dragRef.current.didMove) return; setSelected(null); };
 
-  // ── Global move ───────────────────────────────────────────────────────────
   const onMove = useCallback((e) => {
     if (!dragRef.current.active) return;
     e.preventDefault();
-
     const pos = getPos(e);
     const dx = pos.x - dragRef.current.startX;
     const dy = pos.y - dragRef.current.startY;
-
-    if (Math.abs(dx) > 2 || Math.abs(dy) > 2) {
-      dragRef.current.didMove = true;
-    }
-
+    if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) dragRef.current.didMove = true;
     const { type, itemId, origX, origY, origW, origH } = dragRef.current;
-    const cw = canvasRef.current?.offsetWidth || 360;
-    const ch = canvasRef.current?.offsetHeight || 340;
-
     setItems(prev => prev.map(i => {
       if (i.id !== itemId) return i;
-      if (type === "move") {
-        return { ...i, x: Math.max(0, Math.min(cw - i.w, origX + dx)), y: Math.max(0, Math.min(ch - i.h, origY + dy)) };
-      } else {
-        return { ...i, w: Math.max(50, origW + dx), h: Math.max(60, origH + dy) };
-      }
+      if (type === "move") return { ...i, x: Math.max(0, Math.min(100 - i.w, origX + dx)), y: Math.max(0, Math.min(100 - i.h, origY + dy)) };
+      return { ...i, w: Math.max(10, origW + dx), h: Math.max(12, origH + dy) };
     }));
   }, []);
 
-  // ── Global up ─────────────────────────────────────────────────────────────
   const onUp = useCallback(() => {
-    // keep didMove true briefly so onCanvasClick can read it, then reset
     setTimeout(() => { dragRef.current.active = false; dragRef.current.didMove = false; }, 50);
   }, []);
 
@@ -195,32 +191,20 @@ export default function BuildTab({ uid, clothes, onOutfitSaved }) {
     };
   }, [onMove, onUp]);
 
-  // ── Save snapshot ─────────────────────────────────────────────────────────
   const handleSave = async () => {
     if (items.length === 0 || saving) return;
     setSaving(true);
     try {
-      const el = canvasRef.current;
-      const w = el.offsetWidth, h = el.offsetHeight;
-      const off = document.createElement("canvas");
-      off.width = w; off.height = h;
-      const ctx = off.getContext("2d");
-      ctx.fillStyle = "#f5f5f0";
-      ctx.fillRect(0, 0, w, h);
-
-      const sorted = [...items].sort((a, b) => a.zIndex - b.zIndex);
-      await Promise.all(sorted.map(item => new Promise(resolve => {
-        const img = new Image();
-        img.onload = () => { ctx.drawImage(img, item.x, item.y, item.w, item.h); resolve(); };
-        img.onerror = resolve;
-        img.src = item.imageBase64;
-      })));
-
-      const imageBase64 = off.toDataURL("image/jpeg", 0.85);
-      await addOutfitImage(uid, { name: `Outfit ${new Date().toLocaleDateString("fi-FI")}`, imageBase64 });
-      setItems([]); setSelected(null);
-      showToast("Outfit saved ✓");
-      onOutfitSaved();
+      const layoutItems = items.map(({ id, clothId, x, y, w, h, zIndex }) => ({ id, clothId, x, y, w, h, zIndex }));
+      const thumbnailBase64 = await generateThumbnail(items, clothes);
+      if (isEditing) {
+        await updateOutfit(uid, initialOutfit.id, { name: outfitName, items: layoutItems, thumbnailBase64 });
+        showToast("Outfit updated ✓");
+      } else {
+        await saveOutfit(uid, { name: outfitName, items: layoutItems, thumbnailBase64 });
+        showToast("Outfit saved ✓");
+      }
+      setTimeout(() => { onOutfitSaved(); }, 800);
     } catch (err) {
       console.error(err);
       showToast("Save failed — try again");
@@ -231,36 +215,48 @@ export default function BuildTab({ uid, clothes, onOutfitSaved }) {
 
   return (
     <div style={S.root}>
+      {/* Name row */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+        <input
+          style={S.nameInput}
+          value={outfitName}
+          onChange={(e) => setOutfitName(e.target.value)}
+          placeholder="Outfit name"
+        />
+        {onClose && <button style={{ ...S.btnIcon(false), marginLeft: "auto" }} onClick={onClose}>✕ Close</button>}
+      </div>
+
       {/* Canvas */}
-      <div ref={canvasRef} style={S.canvas} onClick={onCanvasClick}>
-        {items.length === 0 && (
-          <div style={S.canvasEmpty}>
-            <span style={S.canvasEmptyIcon}>👗</span>
-            <span style={S.canvasEmptyText}>Tap items below to add</span>
-          </div>
-        )}
-        {items.map(item => (
-          <div
-            key={item.id}
-            style={S.item(item.x, item.y, item.w, item.h, item.zIndex, selected === item.id)}
-            onMouseDown={(e) => onItemDown(e, item.id, "move")}
-            onTouchStart={(e) => onItemDown(e, item.id, "move")}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <img src={item.imageBase64} alt={item.name} style={S.itemImg} />
-            {selected === item.id && (
-              <>
-                <div
-                  style={S.resizeHandle}
-                  onMouseDown={(e) => { e.stopPropagation(); onItemDown(e, item.id, "resize"); }}
-                  onTouchStart={(e) => { e.stopPropagation(); onItemDown(e, item.id, "resize"); }}
-                />
-                <button style={S.deleteHandle} onClick={(e) => removeItem(e, item.id)}>×</button>
-              </>
-            )}
-          </div>
-        ))}
-        {saving && <div style={S.savingOverlay}><div style={S.spinner} /></div>}
+      <div style={S.canvasWrap}>
+        <div ref={canvasRef} style={S.canvasInner} onClick={onCanvasClick}>
+          {items.length === 0 && (
+            <div style={S.canvasEmpty}>
+              <span style={S.canvasEmptyIcon}>👗</span>
+              <span style={S.canvasEmptyText}>Tap items below to add</span>
+            </div>
+          )}
+          {items.map(item => (
+            <div
+              key={item.id}
+              style={S.item(item.x, item.y, item.w, item.h, item.zIndex, selected === item.id)}
+              onMouseDown={(e) => onItemDown(e, item.id, "move")}
+              onTouchStart={(e) => onItemDown(e, item.id, "move")}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <img src={item.imageBase64} alt={item.name} style={S.itemImg} />
+              {selected === item.id && (
+                <>
+                  <div style={S.resizeHandle}
+                    onMouseDown={(e) => { e.stopPropagation(); onItemDown(e, item.id, "resize"); }}
+                    onTouchStart={(e) => { e.stopPropagation(); onItemDown(e, item.id, "resize"); }}
+                  />
+                  <button style={S.deleteHandle} onClick={(e) => removeItem(e, item.id)}>×</button>
+                </>
+              )}
+            </div>
+          ))}
+          {saving && <div style={S.savingOverlay}><div style={S.spinner} /></div>}
+        </div>
       </div>
 
       {/* Toolbar */}
@@ -269,7 +265,7 @@ export default function BuildTab({ uid, clothes, onOutfitSaved }) {
         <button style={S.btnIcon(!selected)} onClick={sendBack} disabled={!selected}>↓ Back</button>
         <button style={S.btnIcon(items.length === 0)} onClick={() => { setItems([]); setSelected(null); }} disabled={items.length === 0}>Clear</button>
         <button style={S.btnSave(items.length === 0 || saving)} onClick={handleSave} disabled={items.length === 0 || saving}>
-          Save outfit
+          {isEditing ? "Update outfit" : "Save outfit"}
         </button>
       </div>
 

@@ -51,14 +51,20 @@ const S = {
   outfitActions: { display: "flex", gap: 10, marginTop: 14 },
   btnPrimary: { flex: 1, padding: "12px 0", borderRadius: 10, background: "#d4a0a0", color: "#1a1a1e", border: "none", fontWeight: 600, fontSize: 14, cursor: "pointer" },
   btnSecondary: { flex: 1, padding: "12px 0", borderRadius: 10, background: "#2e2e36", color: "#f0ece4", border: "none", fontSize: 14, cursor: "pointer" },
-  // Outfits tab
-  outfitCard: { background: "#22222a", borderRadius: 14, overflow: "hidden", marginBottom: 14 },
-  outfitImg: { width: "100%", display: "block", borderRadius: "14px 14px 0 0" },
-  outfitFooter: { padding: "10px 14px", display: "flex", justifyContent: "space-between", alignItems: "center" },
-  outfitName: { fontWeight: 600, fontSize: 14 },
-  outfitDate: { color: "#555", fontSize: 12 },
-  outfitDeleteBtn: { background: "none", border: "none", color: "#666", cursor: "pointer", fontSize: 16 },
-  // Modal
+
+  // Outfits grid
+  outfitsGrid: { display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 12 },
+  outfitCard: { background: "#22222a", borderRadius: 14, overflow: "hidden", cursor: "pointer", position: "relative" },
+  outfitThumb: { width: "100%", aspectRatio: "3/4", objectFit: "cover", display: "block", background: "#2e2e36" },
+  outfitCardFooter: { padding: "8px 10px 10px", display: "flex", justifyContent: "space-between", alignItems: "center" },
+  outfitCardName: { fontWeight: 600, fontSize: 13, color: "#f0ece4" },
+  outfitCardDate: { color: "#555", fontSize: 11 },
+  outfitDeleteBtn: { background: "none", border: "none", color: "#555", cursor: "pointer", fontSize: 15, padding: "2px 4px" },
+
+  // Full screen modal
+  modalFull: { position: "fixed", inset: 0, background: "#1a1a1e", zIndex: 200, overflowY: "auto", padding: "16px 16px 40px" },
+
+  // Add cloth modal
   overlay: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.85)", zIndex: 200, display: "flex", alignItems: "flex-end" },
   modal: { background: "#22222a", borderRadius: "20px 20px 0 0", width: "100%", maxHeight: "85vh", padding: 24, overflowY: "auto" },
   modalTitle: { fontSize: 17, fontWeight: 600, marginBottom: 18 },
@@ -188,21 +194,24 @@ function ClosetTab({ uid, clothes, onDelete }) {
   );
 }
 
-function OutfitsTab({ uid, outfits, onDelete }) {
+function OutfitsTab({ uid, outfits, clothes, onEdit, onDelete }) {
   if (outfits.length === 0) {
     return <div style={S.emptyState}><span style={S.emptyIcon}>✨</span><div style={S.emptyText}>No saved outfits yet</div><div style={S.emptyHint}>Build one from the Build tab</div></div>;
   }
   return (
-    <div>
+    <div style={S.outfitsGrid}>
       {outfits.map((outfit) => (
-        <div key={outfit.id} style={S.outfitCard}>
-          <img src={outfit.imageBase64} alt={outfit.name} style={S.outfitImg} />
-          <div style={S.outfitFooter}>
+        <div key={outfit.id} style={S.outfitCard} onClick={() => onEdit(outfit)}>
+          {outfit.thumbnailBase64
+            ? <img src={outfit.thumbnailBase64} alt={outfit.name} style={S.outfitThumb} />
+            : <div style={{ ...S.outfitThumb, display: "flex", alignItems: "center", justifyContent: "center" }}><span style={{ fontSize: 32, opacity: 0.2 }}>👗</span></div>
+          }
+          <div style={S.outfitCardFooter}>
             <div>
-              <div style={S.outfitName}>{outfit.name}</div>
-              <div style={S.outfitDate}>{new Date(outfit.createdAt).toLocaleDateString("fi-FI")}</div>
+              <div style={S.outfitCardName}>{outfit.name}</div>
+              <div style={S.outfitCardDate}>{new Date(outfit.createdAt).toLocaleDateString("fi-FI")}</div>
             </div>
-            <button style={S.outfitDeleteBtn} onClick={() => onDelete(uid, outfit.id)}>🗑</button>
+            <button style={S.outfitDeleteBtn} onClick={(e) => { e.stopPropagation(); onDelete(outfit.id); }}>🗑</button>
           </div>
         </div>
       ))}
@@ -215,6 +224,7 @@ export default function App() {
   const [tab, setTab] = useState("closet");
   const [clothes, setClothes] = useState([]);
   const [outfits, setOutfits] = useState([]);
+  const [editingOutfit, setEditingOutfit] = useState(null); // null | outfit object | "new"
 
   useEffect(() => { initAuth((user) => setUid(user.uid)); }, []);
 
@@ -233,10 +243,25 @@ export default function App() {
   }, []);
 
   const handleDeleteCloth = useCallback(async (id) => { if (uid) await deleteCloth(uid, id); }, [uid]);
-  const handleDeleteOutfit = useCallback(async (uid, id) => { await deleteOutfit(uid, id); }, []);
+  const handleDeleteOutfit = useCallback(async (id) => { if (uid) await deleteOutfit(uid, id); }, [uid]);
 
   if (!uid) {
     return <div style={S.loadingScreen}><div style={S.spinner} /><div style={{ color: "#555", fontSize: 14 }}>Loading your closet…</div></div>;
+  }
+
+  // Full screen canvas modal (new or edit)
+  if (editingOutfit !== null) {
+    return (
+      <div style={S.modalFull}>
+        <BuildTab
+          uid={uid}
+          clothes={clothes}
+          initialOutfit={editingOutfit === "new" ? null : editingOutfit}
+          onOutfitSaved={() => { setEditingOutfit(null); setTab("outfits"); }}
+          onClose={() => setEditingOutfit(null)}
+        />
+      </div>
+    );
   }
 
   return (
@@ -256,8 +281,29 @@ export default function App() {
       </div>
       <div style={S.body}>
         {tab === "closet" && <ClosetTab uid={uid} clothes={clothes} onDelete={handleDeleteCloth} />}
-        {tab === "build" && <BuildTab uid={uid} clothes={clothes} onOutfitSaved={() => setTab("outfits")} />}
-        {tab === "outfits" && <OutfitsTab uid={uid} outfits={outfits} onDelete={handleDeleteOutfit} />}
+        {tab === "build" && (
+          <BuildTab
+            uid={uid}
+            clothes={clothes}
+            initialOutfit={null}
+            onOutfitSaved={() => setTab("outfits")}
+            onClose={null}
+          />
+        )}
+        {tab === "outfits" && (
+          <>
+            <button style={{ ...S.btnPrimary, marginBottom: 16 }} onClick={() => setEditingOutfit("new")}>
+              + New outfit
+            </button>
+            <OutfitsTab
+              uid={uid}
+              outfits={outfits}
+              clothes={clothes}
+              onEdit={(outfit) => setEditingOutfit(outfit)}
+              onDelete={handleDeleteOutfit}
+            />
+          </>
+        )}
       </div>
     </div>
   );

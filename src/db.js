@@ -1,6 +1,7 @@
 import {
   collection,
   addDoc,
+  updateDoc,
   deleteDoc,
   doc,
   onSnapshot,
@@ -26,11 +27,20 @@ export function subscribeClothes(uid, callback) {
   return onSnapshot(q, (snap) => callback(snap.docs.map((d) => ({ id: d.id, ...d.data() }))));
 }
 
-// ─── Outfits (saved as image snapshots) ──────────────────────────────────────
+// ─── Outfits ──────────────────────────────────────────────────────────────────
+// Each outfit stores:
+//   name, createdAt, thumbnailBase64 (small preview),
+//   items: [{ id, clothId, x, y, w, h, zIndex }]
 
-export async function addOutfitImage(uid, { name, imageBase64 }) {
-  await addDoc(collection(db, "users", uid, "outfits"), {
-    name, imageBase64, createdAt: Date.now(),
+export async function saveOutfit(uid, { name, items, thumbnailBase64 }) {
+  return await addDoc(collection(db, "users", uid, "outfits"), {
+    name, items, thumbnailBase64, createdAt: Date.now(),
+  });
+}
+
+export async function updateOutfit(uid, outfitId, { name, items, thumbnailBase64 }) {
+  await updateDoc(doc(db, "users", uid, "outfits", outfitId), {
+    name, items, thumbnailBase64,
   });
 }
 
